@@ -1,0 +1,297 @@
+# Atlassian Blackbox — the AI flight recorder for software teams
+# Codegeist 2026: "Build with context. Ship with confidence."
+# Learns from every sprint's crashes, near-misses and wins — then warns the
+# next sprint before it repeats them. Forensics + memory + Monte-Carlo.
+
+modules:
+  # ---------- UI surfaces ----------
+  jira:globalPage:
+    - key: blackbox-flight-deck
+      resource: main-ui
+      resolver:
+        function: resolver
+      render: native
+      title: Blackbox
+
+  jira:issuePanel:
+    - key: blackbox-recorder
+      resource: main-ui
+      resolver:
+        function: resolver
+      render: native
+      title: Blackbox
+      icon: resource:static-assets;icons/radar.svg
+
+  # ---------- AI brain ----------
+  rovo:agent:
+    - key: blackbox-agent
+      name: Blackbox
+      description: >-
+        AI flight recorder for software teams. I replay your sprints'
+        history — crashes, near-misses and wins — then forecast the current
+        sprint, flag work that resembles past trouble (déjà-vu), and run
+        retrospectives from evidence, not memory.
+      prompt: resource:agent-prompts;blackbox-agent-prompt.txt
+      conversationStarters:
+        - Learn my board
+        - Forecast this sprint
+        - What does history say about this issue?
+        - Run the retro for our last sprint
+        - Preflight: should we commit to this sprint?
+      actions:
+        - learn-board
+        - examine-issue
+        - forecast-sprint
+        - deja-vu
+        - sprint-retro
+        - preflight-check
+        - draft-lesson-task
+        - annotate-issue
+      followUpPrompt: >-
+        Suggest one specific next action grounded in the history you just
+        cited — descope an item, draft a follow-up from a finding, or ask
+        the person who resolved the similar past issue — phrased as a
+        question.
+
+  rovo:skill:
+    - key: preflight-skill
+      source:
+        dir: skills/preflight
+      dependencies:
+        tools:
+          - learn-board
+          - forecast-sprint
+          - deja-vu
+          - preflight-check
+    - key: sprint-retro-skill
+      source:
+        dir: skills/sprint-retro
+      dependencies:
+        # GET-only on purpose: agents invoked from automation rules cannot
+        # invoke CREATE/UPDATE/TRIGGER actions; the chat-invoked path keeps
+        # the write tools.
+        tools:
+          - learn-board
+          - sprint-retro
+          - examine-issue
+
+  rovo:mcp:
+    - key: blackbox-mcp
+      name: Blackbox tools
+      tools:
+        - learn-board
+        - examine-issue
+        - forecast-sprint
+        - deja-vu
+        - sprint-retro
+        - preflight-check
+        - draft-lesson-task
+        - annotate-issue
+
+  # ---------- Continuous memory ----------
+  trigger:
+    - key: issue-created-trigger
+      function: on-issue-created
+      events:
+        - avi:jira:created:issue
+
+  scheduledTrigger:
+    - key: hourly-memory-trigger
+      function: hourly-memory
+      interval: hour
+
+  # ---------- Actions (agent + MCP callable) ----------
+  action:
+    - key: learn-board
+      name: Learn a board
+      function: act-learn-board
+      actionVerb: GET
+      description: >-
+        Replay the board's sprint history: build the memory corpus from
+        completed items, examine every open item forensically, forecast the
+        active sprint and produce a preflight verdict.
+      inputs:
+        boardId:
+          title: Board ID
+          type: string
+          required: false
+          description: Optional Jira board ID; defaults to the board found in context.
+
+    - key: examine-issue
+      name: Examine an issue forensically
+      function: act-examine-issue
+      actionVerb: GET
+      description: >-
+        Replay one issue's flight recording: full changelog timeline,
+        silence windows, late scope churn, estimate creep, handoffs,
+        escalations — plus the similar past items (déjà-vu).
+      inputs:
+        issueKeyOrId:
+          title: Issue key or ID
+          type: string
+          required: true
+          description: The issue to examine, for example PROJ-123.
+
+    - key: forecast-sprint
+      name: Forecast the sprint (Monte-Carlo)
+      function: act-forecast-sprint
+      actionVerb: GET
+      description: >-
+        Monte-Carlo completion forecast for the active sprint, replaying the
+        team's own daily throughput distribution: on-time probability and
+        p50/p85/p95 completion durations.
+      inputs:
+        boardId:
+          title: Board ID
+          type: string
+          required: false
+          description: Optional Jira board ID; defaults to the board found in context.
+
+    - key: deja-vu
+      name: Déjà-vu check against history
+      function: act-deja-vu
+      actionVerb: GET
+      description: >-
+        Rank the past items most similar to a target issue (or scan the whole
+        open sprint) and weigh their outcomes into a historical risk score.
+      inputs:
+        boardId:
+          title: Board ID
+          type: string
+          required: false
+          description: Optional Jira board ID; defaults to the board found in context.
+        issueKeyOrId:
+          title: Issue key or ID
+          type: string
+          required: false
+          description: Optional single issue to compare; omit to scan the open sprint.
+
+    - key: sprint-retro
+      name: Run the retrospective
+      function: act-sprint-retro
+      actionVerb: GET
+      description: >-
+        Reconstruct the last closed sprint's retrospective from evidence:
+        crashed items, near-misses, wins, and repeating patterns as lessons.
+      inputs:
+        boardId:
+          title: Board ID
+          type: string
+          required: false
+          description: Optional Jira board ID; defaults to the board found in context.
+
+    - key: preflight-check
+      name: Preflight: GO / NO-GO
+      function: act-preflight
+      actionVerb: GET
+      description: >-
+        Commit-decision check before (or during) a sprint: Monte-Carlo
+        on-time probability plus déjà-vu risks, distilled into GO,
+        GO-WITH-CAUTION or NO-GO with cited evidence.
+      inputs:
+        boardId:
+          title: Board ID
+          type: string
+          required: false
+          description: Optional Jira board ID; defaults to the board found in context.
+
+    - key: draft-lesson-task
+      name: Draft follow-up from a lesson
+      function: act-draft-lesson-task
+      actionVerb: CREATE
+      description: >-
+        Create a ready-to-review Jira subtask capturing a forensic finding
+        or retro lesson as structured follow-up work.
+      inputs:
+        parentIssueKey:
+          title: Parent issue key
+          type: string
+          required: true
+          description: The issue the follow-up should attach to, e.g. PROJ-123.
+        summary:
+          title: Task summary
+          type: string
+          required: true
+          description: One-line summary of the follow-up task.
+        findingCode:
+          title: Finding code
+          type: string
+          required: false
+          description: The forensic code that motivated this task (e.g. silent-stall).
+        findingsJson:
+          title: Findings (JSON)
+          type: string
+          required: false
+          description: Optional JSON string of findings to include in the description.
+
+    - key: annotate-issue
+      name: Annotate issue with examination
+      function: act-annotate-issue
+      actionVerb: UPDATE
+      description: >-
+        Post the forensic examination as a formatted Jira comment with the
+        finding breakdown and déjà-vu matches.
+      inputs:
+        issueKeyOrId:
+          title: Issue key or ID
+          type: string
+          required: true
+          description: The issue to annotate, for example PROJ-123.
+
+  # ---------- Backend functions ----------
+  function:
+    - key: resolver
+      handler: index.handler
+    - key: on-issue-created
+      handler: index.onIssueCreated
+    - key: hourly-memory
+      handler: index.hourlyMemory
+      timeoutSeconds: 300
+    - key: act-learn-board
+      handler: index.actLearnBoard
+      # Learning fetches changelogs for the whole sprint; generous timeout.
+      timeoutSeconds: 120
+    - key: act-examine-issue
+      handler: index.actExamineIssue
+    - key: act-forecast-sprint
+      handler: index.actForecastSprint
+    - key: act-deja-vu
+      handler: index.actDejaVu
+    - key: act-sprint-retro
+      handler: index.actSprintRetro
+      timeoutSeconds: 120
+    - key: act-preflight
+      handler: index.actPreflight
+      timeoutSeconds: 120
+    - key: act-draft-lesson-task
+      handler: index.actDraftLessonTask
+    - key: act-annotate-issue
+      handler: index.actAnnotateIssue
+
+resources:
+  - key: main-ui
+    path: src/frontend/index.jsx
+  - key: static-assets
+    path: assets
+  - key: agent-prompts
+    path: prompts
+
+permissions:
+  scopes:
+    # Jira: read work + history, write subtasks and comments
+    - read:jira-work
+    - write:jira-work
+    - read:jira-user
+    # agile/board + sprint history endpoints used by the memory
+    - read:board-scope:jira-software
+    - read:sprint:jira-software
+    - read:issue-details:jira
+    - read:jql:jira
+    - read:project:jira
+    # demo-history seeder: create project/sprints on a judge's empty site
+    - write:sprint:jira-software
+
+app:
+  runtime:
+    name: nodejs24.x
+  id: ari:cloud:ecosystem::app/REPLACE_WITH_YOUR_APP_ID
